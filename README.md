@@ -1,6 +1,9 @@
 # 🤖 Bob AI Assistant - Testing Repository
 
 This repository contains a **Mini Tasks application** designed to test and showcase Bob's capabilities as an AI coding assistant.
+Bob from **IBM** is your AI software development partner that understands your intent, repo, and security standards.
+
+More details about Bob : https://www.ibm.com/products/bob
 
 ## 🎯 Purpose
 
@@ -25,8 +28,6 @@ Bob_mini-tasks/
 │   ├── frontend/             # Modern React UI
 │   └── README.md             # Complete documentation
 │
-├── backend/                  # 🚀 Working backend (current)
-├── frontend/                 # 🎨 Working frontend (current)
 └── README.md                 # This file
 ```
 
@@ -249,4 +250,4 @@ This repository proves Bob can:
 
 **License:** MIT
 
-**Created by:** Bob AI Assistant
+**Created by:** Vincent Perrin & Bob AI Assistant
