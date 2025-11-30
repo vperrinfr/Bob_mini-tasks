@@ -1,4 +1,4 @@
-# 🤖 Bob AI Assistant - Testing Repository
+# 🤖 IBM Project Bob AI Assistant
 
 This repository contains a **Mini Tasks application** designed to test and showcase Bob's capabilities as an AI coding assistant.
 Bob from **IBM** is your AI software development partner that understands your intent, repo, and security standards.
