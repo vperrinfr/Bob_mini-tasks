@@ -1,0 +1,456 @@
+# Complete Bug and Bad Practice Analysis
+
+## 🔴 CRITICAL ISSUES
+
+### 1. Frontend API URL Mismatch
+**Location**: `frontend/App.jsx`, line 13
+```javascript
+fetch(`/task/${id}/toggle`, { method: "POST"});
+```
+**Problem**: The URL uses `/task/` (singular) but the backend router is configured with `/tasks/` (plural) prefix. This will result in 404 Not Found errors.
+**Fix**: 
+```javascript
+fetch(`/tasks/${id}/toggle`, { method: "POST"});
+```
+
+---
+
+### 2. Dangerous Database Session Configuration
+**Location**: `backend/database.py`, line 7
+```python
+SessionLocal = sessionmaker(autocommit=True, autoflush=True, bind=engine)
+```
+**Problem**: 
+- `autocommit=True` disables SQLAlchemy's transaction management
+- Every operation commits immediately, preventing rollbacks on errors
+- Violates ACID principles and can cause data corruption
+- Makes it impossible to group multiple operations in a transaction
+**Fix**:
+```python
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+```
+
+---
+
+### 3. Database Session Leaks (Memory Leak)
+**Location**: `backend/services/task_service.py`, lines 4-6, 8-13, 15-21
+```python
+def get_all_tasks():
+    db = SessionLocal()
+    return db.query(Task).all()  # Session never closed!
+```
+**Problem**: 
+- Sessions are created but never closed
+- Causes memory leaks and connection pool exhaustion
+- Will crash the application under load
+- Each request consumes resources that are never released
+**Fix**: Use dependency injection with FastAPI or context managers:
+```python
+from contextlib import contextmanager
+
+@contextmanager
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+def get_all_tasks():
+    with get_db() as db:
+        return db.query(Task).all()
+```
+Or better, use FastAPI's dependency injection:
+```python
+from fastapi import Depends
+from sqlalchemy.orm import Session
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+@router.get("/")
+def all_tasks(db: Session = Depends(get_db)):
+    return db.query(Task).all()
+```
+
+---
+
+### 4. Missing Error Handling in Service Layer
+**Location**: `backend/services/task_service.py`, lines 15-21
+```python
+def toggle_task(task_id):
+    db = SessionLocal()
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if task:
+        task.done = not task.done
+        db.commit()
+    return task  # Returns None if not found
+```
+**Problem**:
+- Returns `None` silently when task doesn't exist
+- No HTTP status code indication of failure
+- Frontend can't distinguish between success and failure
+- No exception handling for database errors
+**Fix**:
+```python
+from fastapi import HTTPException
+
+def toggle_task(task_id):
+    db = SessionLocal()
+    try:
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        task.done = not task.done
+        db.commit()
+        db.refresh(task)
+        return task
+    except Exception as e:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+```
+
+---
+
+## ⚠️ HIGH PRIORITY ISSUES
+
+### 5. No Request Validation (Type Safety)
+**Location**: `backend/routers/tasks.py`, line 11
+```python
+def new_task(data: dict):
+    return create_task(data.get("title"))
+```
+**Problem**:
+- Uses generic `dict` instead of Pydantic model
+- No validation of input data
+- Could accept empty titles, wrong types, or missing fields
+- `data.get("title")` returns `None` if key missing
+- No API documentation generated
+**Fix**:
+```python
+from pydantic import BaseModel, Field
+
+class TaskCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+
+@router.post("/")
+def new_task(data: TaskCreate):
+    return create_task(data.title)
+```
+
+---
+
+### 6. Missing CORS Configuration
+**Location**: `backend/main.py`
+**Problem**:
+- No CORS middleware configured
+- Frontend requests from different origins (e.g., localhost:3000 to localhost:8000) will be blocked by browsers
+- Common in development when frontend and backend run on different ports
+**Fix**:
+```python
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # Configure for your frontend
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+```
+
+---
+
+### 7. Frontend: No Error Handling
+**Location**: `frontend/App.jsx`, lines 6-10, 12-14
+```javascript
+useEffect(() => {
+  fetch("/tasks")
+    .then(r => r.json())
+    .then(setTasks);
+}, []);
+```
+**Problem**:
+- No error handling for network failures
+- No loading states
+- Silent failures provide poor user experience
+- App crashes if response isn't valid JSON
+**Fix**:
+```javascript
+const [tasks, setTasks] = useState([]);
+const [loading, setLoading] = useState(true);
+const [error, setError] = useState(null);
+
+useEffect(() => {
+  setLoading(true);
+  fetch("/tasks")
+    .then(r => {
+      if (!r.ok) throw new Error('Failed to fetch tasks');
+      return r.json();
+    })
+    .then(setTasks)
+    .catch(err => setError(err.message))
+    .finally(() => setLoading(false));
+}, []);
+```
+
+---
+
+### 8. Frontend: No State Update After Toggle
+**Location**: `frontend/App.jsx`, lines 12-14
+```javascript
+function toggle(id) {
+  fetch(`/tasks/${id}/toggle`, { method: "POST"});
+}
+```
+**Problem**:
+- Doesn't wait for response or update local state
+- UI won't reflect changes until page refresh
+- No feedback if toggle fails
+- Race conditions possible
+**Fix**:
+```javascript
+function toggle(id) {
+  fetch(`/tasks/${id}/toggle`, { method: "POST"})
+    .then(r => r.json())
+    .then(updatedTask => {
+      setTasks(tasks.map(t => t.id === id ? updatedTask : t));
+    })
+    .catch(err => console.error('Toggle failed:', err));
+}
+```
+
+---
+
+## 📋 MEDIUM PRIORITY ISSUES
+
+### 9. Missing Response Models
+**Location**: `backend/routers/tasks.py`, all endpoints
+**Problem**:
+- No Pydantic response models defined
+- API documentation incomplete
+- No guarantee of response structure
+- Type safety issues
+**Fix**:
+```python
+from pydantic import BaseModel
+
+class TaskResponse(BaseModel):
+    id: int
+    title: str
+    done: bool
+    
+    class Config:
+        from_attributes = True
+
+@router.get("/", response_model=list[TaskResponse])
+def all_tasks():
+    return get_all_tasks()
+```
+
+---
+
+### 10. Hardcoded Database URL
+**Location**: `backend/database.py`, line 4
+```python
+DATABASE_URL = "sqlite:///./tasks.db"
+```
+**Problem**:
+- Configuration hardcoded in source code
+- Can't change database without code modification
+- No environment-specific configurations
+- Security risk if credentials were included
+**Fix**:
+```python
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./tasks.db")
+```
+
+---
+
+### 11. No Database Migration Strategy
+**Location**: `backend/main.py`, line 6
+```python
+Base.metadata.create_all(bind=engine)
+```
+**Problem**:
+- Creates tables on every startup
+- No version control for schema changes
+- Can't rollback migrations
+- Doesn't handle schema modifications
+- Production deployments will fail
+**Fix**: Use Alembic for migrations:
+```bash
+alembic init alembic
+alembic revision --autogenerate -m "Initial migration"
+alembic upgrade head
+```
+
+---
+
+### 12. Missing HTTP Status Codes
+**Location**: `backend/routers/tasks.py`, all endpoints
+**Problem**:
+- All endpoints return 200 OK by default
+- POST should return 201 Created
+- Should use proper status codes for different scenarios
+**Fix**:
+```python
+from fastapi import status
+
+@router.post("/", status_code=status.HTTP_201_CREATED)
+def new_task(data: TaskCreate):
+    return create_task(data.title)
+```
+
+---
+
+### 13. No Input Sanitization
+**Location**: `backend/services/task_service.py`, line 8-13
+```python
+def create_task(title):
+    db = SessionLocal()
+    task = Task(title=title)
+```
+**Problem**:
+- No validation or sanitization of title
+- Could accept empty strings, excessive length, or malicious content
+- No trimming of whitespace
+**Fix**: Use Pydantic validation (see issue #5) or add validation:
+```python
+def create_task(title: str):
+    if not title or not title.strip():
+        raise ValueError("Title cannot be empty")
+    if len(title) > 200:
+        raise ValueError("Title too long")
+    
+    db = SessionLocal()
+    task = Task(title=title.strip())
+    # ...
+```
+
+---
+
+## 📝 LOW PRIORITY / CODE QUALITY ISSUES
+
+### 14. Incomplete Test Suite
+**Location**: `backend/tests/test_tasks.py`
+```python
+def test_create_task():
+    assert True
+```
+**Problem**:
+- Placeholder test with no actual testing
+- No test coverage
+- Can't verify functionality
+**Fix**: Implement proper tests:
+```python
+from fastapi.testclient import TestClient
+from ..main import app
+
+client = TestClient(app)
+
+def test_create_task():
+    response = client.post("/tasks/", json={"title": "Test task"})
+    assert response.status_code == 201
+    assert response.json()["title"] == "Test task"
+    assert response.json()["done"] == False
+```
+
+---
+
+### 15. Missing API Versioning
+**Location**: `backend/main.py` and `backend/routers/tasks.py`
+**Problem**:
+- No API version in URLs
+- Breaking changes will affect all clients
+- No migration path for API changes
+**Fix**:
+```python
+router = APIRouter(prefix="/api/v1/tasks")
+```
+
+---
+
+### 16. No Logging
+**Location**: Throughout the application
+**Problem**:
+- No logging for debugging
+- Can't track errors in production
+- No audit trail
+**Fix**:
+```python
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@router.post("/")
+def new_task(data: TaskCreate):
+    logger.info(f"Creating task: {data.title}")
+    return create_task(data.title)
+```
+
+---
+
+### 17. Missing Environment Configuration
+**Location**: Project root
+**Problem**:
+- No `.env` file or configuration management
+- No separation of dev/prod settings
+**Fix**: Create `.env` file and use python-dotenv
+
+---
+
+### 18. No Rate Limiting
+**Location**: `backend/main.py`
+**Problem**:
+- API vulnerable to abuse
+- No protection against DoS attacks
+**Fix**: Add rate limiting middleware like `slowapi`
+
+---
+
+### 19. Frontend: Missing Key Prop Warning Prevention
+**Location**: `frontend/App.jsx`, line 20
+```javascript
+<div key={t.id}>
+```
+**Problem**: While `key` is present, it's on the wrong element for React optimization
+**Fix**: Key should be on the outermost element returned in map
+
+---
+
+### 20. No API Documentation
+**Location**: `backend/main.py`
+**Problem**: 
+- No title, description, or metadata for API docs
+- Default FastAPI docs are minimal
+**Fix**:
+```python
+app = FastAPI(
+    title="Mini Tasks API",
+    description="A simple task management API",
+    version="1.0.0"
+)
+```
+
+---
+
+## Summary Statistics
+- **Critical Issues**: 4 (will cause failures)
+- **High Priority**: 8 (affect reliability, security, UX)
+- **Medium Priority**: 6 (technical debt, maintainability)
+- **Low Priority**: 6 (code quality, best practices)
+- **Total Issues**: 24
